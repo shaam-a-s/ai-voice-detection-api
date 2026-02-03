@@ -66,6 +66,10 @@ def extract_features_from_bytes(audio_bytes):
     
     return features.reshape(1, -1)
 
+@app.get("/healthz")
+def health():
+    return {"status": "ok"}
+
 @app.post("/api/voice-detection")
 async def voice_detection(request: Request):
     # check API key
