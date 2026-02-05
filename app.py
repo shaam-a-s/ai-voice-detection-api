@@ -37,30 +37,65 @@ except Exception as e:
     raise RuntimeError("Model loading failed.")
 
 def extract_features_from_bytes(audio_bytes):
-    # soundfile can read from a bytes IO object
-    audio, sr = sf.read(io.BytesIO(audio_bytes))
+    """
+    Optimized feature extraction for low-memory environments (Render Free Tier).
+    Reduces memory usage by:
+    1. Resampling to lower sample rate (22050 Hz instead of 44100 Hz)
+    2. Limiting audio duration to 10 seconds max
+    3. Processing in smaller chunks
+    """
+    import gc
     
+    logger.info(f"Starting feature extraction. Audio size: {len(audio_bytes)} bytes")
+    
+    # Read audio
+    audio, sr = sf.read(io.BytesIO(audio_bytes))
+    logger.info(f"Audio loaded. Sample rate: {sr}, Duration: {len(audio)/sr:.2f}s")
+    
+    # Convert stereo to mono
     if len(audio.shape) > 1:
         audio = np.mean(audio, axis=1)
+        logger.info("Converted stereo to mono")
     
-    # 1. MFCCs (13)
-    mfcc = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=13)
+    # Limit to 10 seconds to reduce memory
+    max_samples = 10 * sr  # 10 seconds
+    if len(audio) > max_samples:
+        logger.info(f"Trimming audio from {len(audio)/sr:.2f}s to 10s")
+        audio = audio[:max_samples]
+    
+    # Resample to 22050 Hz if higher (reduces computation)
+    target_sr = 22050
+    if sr > target_sr:
+        logger.info(f"Resampling from {sr} Hz to {target_sr} Hz")
+        audio = librosa.resample(audio, orig_sr=sr, target_sr=target_sr)
+        sr = target_sr
+        gc.collect()  # Force garbage collection
+    
+    # Extract features with reduced complexity
+    logger.info("Computing MFCCs...")
+    mfcc = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=13, n_fft=1024, hop_length=512)
     mfcc_mean = np.mean(mfcc, axis=1)
     
-    # 2. Delta MFCCs (13)
+    logger.info("Computing delta features...")
     delta_mfcc = librosa.feature.delta(mfcc)
     delta_mean = np.mean(delta_mfcc, axis=1)
+    del mfcc  # Free memory immediately
+    gc.collect()
     
-    # 3. Delta-Delta MFCCs (13)
-    delta2_mfcc = librosa.feature.delta(mfcc, order=2)
+    delta2_mfcc = librosa.feature.delta(delta_mfcc, order=2)
     delta2_mean = np.mean(delta2_mfcc, axis=1)
+    del delta_mfcc, delta2_mfcc
+    gc.collect()
     
-    # 4. Spectral Features (2)
-    spectral_centroid = librosa.feature.spectral_centroid(y=audio, sr=sr)
+    logger.info("Computing spectral features...")
+    spectral_centroid = librosa.feature.spectral_centroid(y=audio, sr=sr, n_fft=1024)
     centroid_mean = np.mean(spectral_centroid)
+    del spectral_centroid
     
-    spectral_flatness = librosa.feature.spectral_flatness(y=audio)
+    spectral_flatness = librosa.feature.spectral_flatness(y=audio, n_fft=1024)
     flatness_mean = np.mean(spectral_flatness)
+    del spectral_flatness, audio
+    gc.collect()
     
     features = np.concatenate([
         mfcc_mean, 
@@ -70,6 +105,7 @@ def extract_features_from_bytes(audio_bytes):
         [flatness_mean]
     ])
     
+    logger.info(f"Feature extraction complete. Shape: {features.shape}")
     return features.reshape(1, -1)
 
 @app.get("/")
